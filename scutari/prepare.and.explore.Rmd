@@ -1,0 +1,1076 @@
+---
+title: "Data Exploration and Preparation"
+author: "Marco Scutari"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r load_libraries, cache = FALSE, echo = FALSE, message = FALSE, warning = FALSE, results = FALSE}
+library(knitr)
+library(bnlearn)
+library(lattice)
+library(latticeExtra)
+library(gridExtra)
+
+knitr::opts_chunk$set(fig.align = "center")
+
+standard.barplot = function(x, xlab = "number of observations") {
+
+  my.padding = list(
+      layout.heights = list(
+        top.padding = 0,
+        main.key.padding = 0,
+        key.axis.padding = 0,
+        axis.xlab.padding = 0,
+        xlab.key.padding = 0,
+        key.sub.padding = 0),
+      layout.widths = list(
+        left.padding = 0,
+        key.ylab.padding = 0,
+        ylab.axis.padding = 0,
+        axis.key.padding = 0,
+        right.padding = 0)
+      )
+
+  barchart(rev(x), horizontal = TRUE, col = "skyblue",
+    xlim = c(0, 1.05), xlab = xlab, 
+    panel = function(...) {
+      
+      panel.barchart(...)
+      panel.grid(h = 0, v = -1)
+      
+    }, par.settings = my.padding)
+
+}#STANDARD.BARPLOT
+
+standard.heatmap = function(mat, numbers = TRUE, digits = 2, cex = 0.8, 
+    abs = FALSE, main = "") {
+
+  col.l = colorRampPalette(c('ivory', 'tomato'))(30)
+
+  my.padding = list(
+      layout.heights = list(
+        top.padding = 0,
+        main.key.padding = 0,
+        key.axis.padding = 0,
+        axis.xlab.padding = 0,
+        xlab.key.padding = 0,
+        key.sub.padding = 0),
+      layout.widths = list(
+        left.padding = 0,
+        key.ylab.padding = 0,
+        ylab.axis.padding = 0,
+        axis.key.padding = 0,
+        right.padding = 0),
+      panel.background = list(
+        col = "grey90"
+       )
+      )
+
+  if (abs)
+    transformed = abs(mat)
+  else
+    transformed = mat
+
+  levelplot(transformed, col.regions = col.l, colorkey = FALSE,
+    scales = list(x = list(rot = 90)), xlab = "", ylab = "", main = main,
+    panel = function(y, x, z, ...) {
+
+      panel.levelplot(y = y, x = x, z = z, ...)
+
+      if (numbers) {
+
+        if (abs)
+          rounded = as.character(round(mat[cbind(x, y)], digits))
+        else
+          rounded = as.character(round(z, digits))
+        rounded[is.na(rounded)] = ""
+        ltext(x = x, y = y, labels = rounded, cex = cex)
+
+      }#THEN
+
+    }, par.settings = my.padding
+  )
+
+}#STANDARD.HEATMAP
+
+standard.histogram = function(var, legend) {
+
+  histogram(var,
+    scales = list(tck = c(1, 0)),
+    xlab = legend, ylab = "percent of total", col = "skyblue",
+    panel = function(...) {
+
+      panel.grid(h = -1, v = 0)
+      panel.histogram(...)
+
+  })
+
+}#STANDARD.HISTOGRAM
+
+standard.xyplot = function(formula, xlab, ylab, regression = FALSE) {
+
+  xyplot(formula, data = data, pch = 19, 
+    scales = list(tck = c(1, 0)),
+    xlab = xlab, ylab = ylab,
+    panel = function(...) {
+
+      panel.grid(h = -1, v = -1)
+      panel.xyplot(..., col = "skyblue")
+      if (regression)
+        panel.smoother(..., col = "skyblue3", lwd = 3, span = 1/2, level = 0.95)
+
+  })
+
+}#STANDARD.XYPLOT
+
+prepare.map = function(data, fun) {
+
+  latitudes = sort(unique(data[, "lat"]))
+  longitudes = sort(unique(data[, "lon"]), decreasing = FALSE)
+  map = matrix(0, nrow = length(longitudes), ncol = length(latitudes), 
+            dimnames = list(longitude = longitudes, latitude = latitudes))
+
+  for (i in seq_along(longitudes))
+    for (j in seq_along(latitudes)) {
+
+      location = subset(data, (lon == longitudes[i]) & (lat == latitudes[j]))
+
+      if (nrow(location) == 0)
+        map[i, j] = NA
+      else
+        map[i, j] = fun(location)
+
+    }#FOR
+
+  map[is.nan(map)] = NA
+
+  return(map)
+
+}#PREPARE.MAP
+
+species = c("herring", "sprat", "cod", "flounder", "whitefish", "salmon", 
+            "trout", "smelt", "bream", "ide", "roach", "pike", "perch",
+            "sander", "burbot", "vendace")
+```
+
+# Load and Subset the Data
+
+```{r load_the_data}
+data = readRDS("../data/prepd.rds")
+dim(data)
+```
+
+* Remove areas far from the Finnish coast: the catch data comes from Finnish 
+  professional fishers, so the data is not representative of the total catches 
+  of the far-away areas.
+
+```{r restrict_to_close_coastal_areas}
+close.to.finland = 
+  c("2", "3", "5", "6", "7", "10", "11", "12", "14", "15", "16", "19", "20", 
+    "22", "23", "24", "27", "28", "31", "32", "36", "37", "41", "42", "45",
+    "46", "47", "49", "50", "51", "52", "53", "54", "55", "56", "57", "59", 
+    "60", "61", "62", "63", "64")
+
+data = data[data$rectangle %in% close.to.finland, ]
+```
+
+* Observations with missing months are self-reporting over the whole year. We
+  could assume that the catches have the same distribution over the months as
+  the rest of the data, but we just drop them for simplicity.
+
+```{r remove_unknown_months}
+data = data[!is.na(data$month), ]
+```
+
+```{r factor_cleanup, echo = FALSE}
+for (var in names(data))
+  if (is.factor(data[, var]))
+    data[, var] = droplevels(data[, var])
+```
+
+# Explore the Missing Values
+
+The proportion of missing values is negligible (< 10%) for all the geographical
+and catch variables. It is significant (> 30%) for all the variables that
+measure the water characteristics and for `surface`.
+
+```{r proportions_of_missing_values, echo = FALSE, fig.width = 8, fig.height = 8}
+local({
+
+  props = sapply(data, function(x) mean(is.na(x)))
+
+  standard.barplot(props, xlab = "proportion of missing data")
+
+})
+```
+
+The distribution of missing values over the years is approximately constant,
+suggesting that the pattern of missingness is not time-dependent. Or at least
+that it does not have a trend.
+
+```{r missing_values_over_years, echo = FALSE, fig.width = 8, fig.height = 8}
+local({
+
+  props = numeric(nlevels(data$year))
+  names(props) = levels(data$year)
+
+  for (current in names(props)) {
+
+    period = subset(data, year == current)
+    props[current] = sum(sapply(period, function(x) sum(is.na(x)))) /
+                       (nrow(period) * ncol(period))
+
+  }#FOR
+
+  standard.barplot(props, xlab = "proportion of missing data")
+
+})
+```
+
+The missing values do not appear to have a seasonal component; their proportion
+remains relatively constant over the year. There seems to be a shallow peak in
+winter and around New Year.
+
+```{r missing_values_over_months, echo = FALSE, fig.width = 8, fig.height = 4}
+local({
+
+  props = numeric(nlevels(data$month))
+  names(props) = levels(data$month)
+
+  for (current in names(props)) {
+
+    period = subset(data, month == current)
+    props[current] = sum(sapply(period, function(x) sum(is.na(x)))) /
+                       (nrow(period) * ncol(period))
+
+  }#FOR
+
+  standard.barplot(props, xlab = "proportion of missing data")
+
+})
+```
+
+What is the geographical distribution of the missing data?
+
+```{r missing_data_over_space, echo = FALSE, fig.width = 8, fig.height = 8}
+local({
+
+  props = prepare.map(data, fun = function(loc) {
+
+    sum(sapply(loc, function(x) sum(is.na(x)))) / (nrow(loc) * ncol(loc))
+
+  })
+
+  standard.heatmap(props)
+
+})
+```
+
+There are just three locations with proportions of missing data greater than 
+30%. The reason is that there are (years, months) in which no species catches
+are measured at all. For the rest, all the species are monitored. It happens in
+(59.75, 25.5):
+
+```{r location_with_many_missing_1, echo = FALSE}
+local({
+
+  location = subset(data, (lat == 59.75) & (lon == 25.5))
+  props = apply(location[, species], 1, function(x) sum(is.na(x)))
+  props = paste(props, "/", length(species))
+  kable(table(props))
+
+})
+```
+
+It happens in (65.25, 23.5):
+
+```{r location_with_many_missing_2, echo = FALSE}
+local({
+
+  location = subset(data, (lat == 65.25) & (lon == 23.5))
+  props = apply(location[, species], 1, function(x) sum(is.na(x)))
+  props = paste(props, "/", length(species))
+  kable(table(props))
+
+})
+```
+
+And it happens (65.25, 23.5):
+
+```{r location_with_many_missing_3, echo = FALSE}
+local({
+
+  location = subset(data, (lat == 64.25) & (lon == 22.5))
+  props = apply(location[, species], 1, function(x) sum(is.na(x)))
+  props = paste(props, "/", length(species))
+  kable(table(props))
+
+})
+```
+
+# Clean Up the Missing Values
+
+Based on the findings above, we:
+
+* Remove the `chlorophyll.a`, `suspended.solids` and `ice` variables because
+  more than 60% of their values are missing.
+
+```{r remove_variables}
+data = data[, setdiff(colnames(data), c("chlorophyll.a", "suspended.solids", "ice"))]
+```
+
+* Remove the observations for which all species catches are missing values.
+
+```{r remove_observations_with_no_catches}
+missing.species = apply(data[, species], 1, function(x) sum(is.na(x)))
+data = data[missing.species != length(species), ]
+```
+
+```{r define_time_periods, echo = FALSE}
+decades = ordered(gsub("[0-9]$", "0", data[, "year"]))
+seasons = factor(data[, "month"], labels = c(rep("winter", 2), 
+            rep("spring", 3), rep("summer", 3), rep("autumn", 3), "winter"))
+```
+
+# Explore the Catch Variables
+
+The yearly volume of catch across all species and locations has a cyclic pattern
+with a period of about 15 years. Here plotted with 95% confidence bands.
+
+```{r total_volume_of_catches, echo = FALSE, fig.width = 9, fig.height = 4}
+local({
+  
+  df = aggregate(data[, species], by = data[, "year", drop = FALSE], FUN = sum)
+  df = data.frame(year = df[, "year"], catch = rowSums(df[, -1]))
+
+  xyplot(catch ~ year, data = df, col = "skyblue", 
+    ylab = "total catch", xlab = "year",
+    scales = list(tck = c(1, 0), alternating = 1,
+                  x = list(at = c(1 + 0:4 * 10), rot = 45)),
+    panel = function(x, y, ...) {
+
+      panel.abline(h = mean(y), col = "lightgrey")
+      panel.smoother(y = y, x = x, ..., lwd = 2, span = 1/3, level = 0.95)
+
+    })
+
+})
+```
+
+The catches for each species over all locations evolve over time. Here they are
+standardised and plotted with 95% confidence bands.
+
+```{r overall_volume_of_catches_per_species, echo = FALSE, fig.width = 10, fig.height = 8}
+local({
+
+  overall.catch = sapply(species, function(s) {
+    aggregate(data[, s], by = data[, "year", drop = FALSE], FUN = sum)
+  }, simplify = FALSE)
+
+  df = sapply(overall.catch, function(species) scale(species[, "x"]))
+  df = data.frame(year = overall.catch[[1]][, 1], df)
+  df = reshape2::melt(df, id.var = "year", value.name = "catch", variable.name = "species")
+
+  print(xyplot(catch ~ year | species, data = df, col = "skyblue",
+    ylab = "standardized catch", xlab = "year",
+    scales = list(tck = c(1, 0), alternating = 1, 
+                  x = list(at = c(1 + 0:4 * 10), rot = 45)), 
+    panel = function(...) {
+
+      panel.abline(h = 0, col = "lightgrey")
+      panel.smoother(..., lwd = 2, span = 1/3, level = 0.95)
+
+    }))
+
+})
+```
+
+The catches overall have a seasonality that comes from fishing seasons: they
+concentrate between April and July.
+
+```{r seasonality_of_aggregated_catches, echo = FALSE, fig.width = 9, fig.height = 4}
+local({
+
+  df = aggregate(data[, species], by = data[, "month", drop = FALSE], FUN = sum)
+  df = data.frame(month = df[, "month"], catch = rowSums(df[, -1]))
+
+  xyplot(catch ~ month, data = df, col = "skyblue",
+    ylab = "total catch", xlab = "month",
+    scales = list(tck = c(1, 0), alternating = 1),
+    panel = function(x, y, ...) {
+
+      panel.abline(h = mean(y), col = "lightgrey")
+      panel.abline(v = c(4, 7), col = "lightgrey", lty = 2)
+      panel.smoother(y = y, x = x, ..., lwd = 2, span = 1/3, level = 0.95)
+
+    })
+
+})
+```
+
+As expected, most species are caught for the most part between April and July.
+A few exceptions, like sprat, vendace, burbot, are caught primarily
+in winter. They may account for the slight increase in catch between November
+and January.
+
+```{r seasonality_of_catches_by_species, echo = FALSE, fig.width = 10, fig.height = 8}
+local({
+
+  overall.catch = sapply(species, function(s) {
+    aggregate(data[, s], by = data[, "month", drop = FALSE], FUN = sum)
+  }, simplify = FALSE)
+
+  df = sapply(overall.catch, function(species) scale(species[, "x"]))
+  df = data.frame(month = overall.catch[[1]][, 1], df)
+  df = reshape2::melt(df, id.var = "month", value.name = "catch", variable.name = "species")
+
+  print(xyplot(catch ~ month | species, data = df, col = "skyblue",
+    ylab = "standardized catch", xlab = "month",
+    scales = list(tck = c(1, 0), alternating = 1),
+    panel = function(...) {
+
+      panel.abline(v = c(4, 7), col = "lightgrey", lty = 2)
+      panel.abline(h = 0, col = "lightgrey")
+      panel.smoother(..., lwd = 2, span = 1/3, level = 0.95)
+
+    }))
+
+})
+```
+
+The Spearman correlation between species is mostly positive, which suggests that
+species are not competing for the same (limited) resources in the same areas.
+
+> **Laura:** There are two mechanisms that tie some of the species together: The
+> ones that are most correlated (bream, roach, ide, pike, perch) both line in
+> rather similar habitats (coastal, shallow, near islands, etc.), and they most
+> likely also come from the same fishery: coastal gill-nets and other
+> non-discriminating gear. On the other hand, this should also mean that the
+> fish come in approximately the same proportions to the catch than they are in
+> the nature (although of course how actively they move etc. is species-specific
+> to some extent, which biases this ratio). 
+> 
+> The only quota species here are salmon, herring, and sprat, the latter of
+> which has not traditionally been a targeted species in Finland. There are some
+> technical restrictions in the fishery of other species too, such as minimum
+> landing sizes, but I would not expect them to drive the catches. 
+
+```{r overall_correlation_between_species, echo = FALSE, fig.width = 8, fig.height = 8}
+local({
+
+  cormat = cor(data[, species], method = "spearman")
+  standard.heatmap(cormat, abs = TRUE)
+
+})
+```
+
+These correlations appear to change over time, suggesting that the (vector time
+series) of the catches might not be homogeneous. The most evident change is the
+increasing correlation between sprat and herring in the bottom left corner. The
+correlation between whitefish and several other fishes appears to increase with
+time.
+
+```{r correlations_between_species_over_time, echo = FALSE, fig.width = 8, fig.height = 12}
+local({
+  
+  figures = vector(nlevels(decades), mode = "list")
+  names(figures) = levels(decades)
+
+  for (d in levels(decades)) {
+
+    cormat = cor(data[decades == d, species], method = "spearman")
+    figures[[d]] = standard.heatmap(cormat, numbers = FALSE, abs = TRUE, main = d)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 2)))
+
+})
+```
+
+The spatial distribution of the catches varies between different species: there
+are a few locations in which many species are caught (ide, roach, pike, perch,
+burbot in (60.75, 2.15) and surrounding locations), but there also are species
+that a caught in completely different places (vendace). In addition, there are
+species that are caught in just a single location (vendace, ide, roach, pike,
+perch, burbot) and species that are caught all over the monitored area (trout,
+salmon).
+
+```{r species_over_space, echo = FALSE, fig.width = 12, fig.height = 16}
+local({
+
+  figures = vector(length(species), mode = "list")
+  names(figures) = species
+
+  for (s in species) {
+
+    props = prepare.map(data, fun = function(loc) sum(loc[, s]))
+    figures[[s]] = standard.heatmap(props, numbers = FALSE, main = s)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, ncol = 4))
+
+})
+```
+
+> **Laura:** Basically, I would expect certain factors, such as temperature or
+> its proxies, to explain a lot of variability in the catches of some species,
+> while the geography may be more important for others. If we can find evidence
+> of the actual water quality variables having an effect, that would be nice.
+
+Below are the temperatures recorded for each species, that is, the temperatures
+in those observations in which the species catch is strictly positive. Vendace
+has a profile that is clearly different from the other species. Other
+differences are more subtle. Some species have a second, smaller peak just above
+15C, while others do not.
+
+```{r species_temperature_profiles, echo = FALSE, fig.width = 12, fig.height = 24}
+local({
+
+  df = lapply(species, function(s) {
+
+    record = !is.na(data[, s]) & !is.na(data[, "temperature"]) & (data[, s] > 0)
+    temp = data[record, "temperature"]
+    data.frame(species = rep(s, length(temp)), temperature = temp)
+
+  })
+
+  df = do.call(rbind, df)
+  df$species = factor(df$species, levels = species)
+
+  histogram(~ temperature | species, data = df, layout = c(1, length(species)),
+    scales = list(tck = c(1, 0), alternating = 1),
+    xlim = c(-10, 30), strip = FALSE,
+    panel = function(...) {
+
+      panel.grid(h = -1, v = 0, col = "lightgrey")
+      panel.text(x = 28, y = 17, labels = species[panel.number()], pos = 2)
+      panel.histogram(...)
+  
+    })
+
+})
+```
+
+If we tally the catches across temperature ranges, we can see some more
+differences among species. The plots below show the frequency of temperatures
+(*x*-axis) and normalised caches (*y*-axis) jointly-discretised values. Note
+that both variables, so the intervals differ between plots, should only be
+interpreted in relative terms.
+
+For some species, there is a strong association between temperature and catches.
+Burbot and pike are only caught in large quantities at low temperatures. Perch
+catches appear to increase with temperature. On the other hand, salmon is only
+caught in large quantities at higher temperatures. Pike is mainly caught in
+large quantities at lower temperatures.
+
+```{r catches_temperature_profiles, echo = FALSE, fig.width = 18, fig.height = 18}
+local({
+
+  df = lapply(species, function(s) {
+
+    record = !is.na(data[, s]) & !is.na(data[, "temperature"]) & (data[, s] > 0)
+    temp = data[record, "temperature"]
+    catch = data[record, s]
+    catch = (catch - min(catch)) / (max(catch) - min(catch))
+    data.frame(species = rep(s, length(temp)), 
+               temperature = temp,
+               catch = catch)
+
+  })
+
+  df = do.call(rbind, df)
+  df$species = factor(df$species, levels = species)
+
+  figures = vector(nlevels(species), mode = "list")
+  names(figures) = levels(species)
+
+  for (s in species) {
+
+    tabulated = discretize(df[df$species == s, ], method = "hartemink",
+                  breaks = c(2, 5, 7), ibreaks = c(5, 200, 200))
+    tabulated = table(tabulated)
+
+
+    figures[[s]] = standard.heatmap(tabulated[s, , ], main = s)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 4)))
+
+})
+```
+
+# Explore the Other Variables
+
+The data contain several variables describing the characteristics of each
+location. In addition to the coordinates of its bounding box (`lon.min`,
+`lon.max`, `lat.min`, `lat.max`), we have the actual sea `water.area` and how
+much of it is `open.water` and `coastal.zone`.
+
+The actual sea area is smaller than that in the bounding box and varies
+in [`r range(data[, "water.area"], na.rm = TRUE)`] depending on the coastline.
+
+```{r histogram_of_areas, echo = FALSE}
+standard.histogram(data[, "water.area"], legend = "sea area")
+```
+
+The total area within the bounding box in each location varies in
+[`r range(data[, "area"], na.rm = TRUE)`], so the proportion of water area is
+distributed as follows.
+
+```{r histogram_of_water_area_proportions, echo = FALSE}
+standard.histogram(data[, "water.area"] / data[, "area"], legend = "sea area")
+```
+
+All the missing values for this variable are associated with a single location.
+
+```{r location_with_unknown_area}
+unique(data[is.na(data[, "area"]), c("lon", "lat")])
+unique(data[is.na(data[, "water.area"]), c("lon", "lat")])
+```
+
+---
+
+The proportion of open sea varies by location, from almost none to completely
+open sea. As expected, it is greater in locations farther from the coast.
+The proportion of coastal area is greater for locations close to the coasts and
+is the complement to the open sea areas.
+
+```{r open_sea_by_location, echo = FALSE, fig.width = 12, fig.height = 8}
+local({
+
+  props = prepare.map(data, 
+            fun = function(loc) mean(loc[, "open.water"] / loc[, "water.area"]))
+  p1 = standard.heatmap(props, main = "open water")
+  props = prepare.map(data, 
+            fun = function(loc) mean(loc[, "open.water"] / loc[, "water.area"]))
+  p2 = standard.heatmap(props, main = "coastal zone")
+
+  grid.arrange(p1, p2, ncol = 2)
+
+})
+```
+
+The missing values for both variables are associated with the same location for
+which we do not observe `area` and `water.area`.
+
+```{r location_with_unknown_water_areas}
+unique(data[is.na(data[, "open.water"]), c("lon", "lat")])
+unique(data[is.na(data[, "coastal.zone"]), c("lon", "lat")])
+```
+
+---
+
+The surface sea temperatures range from freezing to just cool. They vary over
+seasons and locations, sometimes dramatically and sometimes not. Missing values
+can be found in all locations and all years/months.
+
+```{r temperature_by_location, echo = FALSE, fig.width = 8, fig.height = 12}
+local({
+
+  figures = vector(nlevels(seasons), mode = "list")
+  names(figures) = levels(seasons)
+
+  for (s in levels(seasons)) {
+
+    props = prepare.map(data[seasons == s, ],
+              fun = function(loc) mean(loc[, "temperature"], na.rm = TRUE))
+    figures[[s]] = standard.heatmap(props, main = s, cex = 0.6)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, ncol = 2))
+
+})
+```
+
+The distribution of the temperatures does not appear to change over time.
+
+```{r temperature_over_time, echo = FALSE, fig.width = 16, fig.height = 5}
+local({
+  
+  figures = vector(nlevels(decades), mode = "list")
+  names(figures) = levels(decades)
+
+  for (d in levels(decades)) {
+
+    props = prepare.map(data[decades == d, ],
+             fun = function(loc) mean(loc[, "temperature"], na.rm = TRUE))
+    figures[[d]] = standard.heatmap(props, numbers = FALSE, main = d)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 5)))
+
+})
+```
+
+---
+
+The amount of phosphorus and nitrogens are forms of pollution (from agriculture?)
+and are related as a result.
+
+```{r compare_phosphorus_and_nitrogens, echo = FALSE}
+standard.xyplot(log(nitrogen) ~ log(phosphorus), regression = TRUE,
+  xlab = "phosphorus (log-scale)", ylab = "nitrogens (log-scale)")
+```
+
+
+Therefore, they have a similar distribution over locations. With over 40% missing
+values, there are no complete data for any locations or years.
+
+```{r pollution_by_location, echo = FALSE, fig.width = 12, fig.height = 8}
+local({
+
+  latitudes = sort(unique(data$lat))
+  longitudes = sort(unique(data$lon), decreasing = FALSE)
+
+  props = prepare.map(data, 
+            fun = function(loc) mean(loc[, "phosphorus"], na.rm = TRUE)) 
+  p1 = standard.heatmap(props, main = "phosphorus")
+  props = prepare.map(data, 
+            fun = function(loc) mean(loc[, "nitrogen"], na.rm = TRUE)) 
+  p2 = standard.heatmap(props, main = "nitrogen")
+
+  grid.arrange(p1, p2, ncol = 2)
+
+})
+```
+
+The distribution of `nitrogen` over locations does not appear to change over
+time.
+
+```{r nitrogen_over_time, echo = FALSE, fig.width = 16, fig.height = 5}
+local({
+  
+  figures = vector(nlevels(decades), mode = "list")
+  names(figures) = levels(decades)
+
+  for (d in levels(decades)) {
+
+    props = prepare.map(data[decades == d, ],
+              fun = function(loc) mean(loc[, "nitrogen"], na.rm = TRUE))
+    figures[[d]] = standard.heatmap(props, numbers = FALSE, main = d)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 5)))
+
+})
+```
+
+The distribution of `phosphorus` *does* appear to change in the 2020s.
+
+```{r phosphorus_over_time, echo = FALSE, fig.width = 16, fig.height = 5}
+local({
+  
+  figures = vector(nlevels(decades), mode = "list")
+  names(figures) = levels(decades)
+
+  for (d in levels(decades)) {
+
+    props = prepare.map(data[decades == d, ],
+              fun = function(loc) mean(loc[, "phosphorus"], na.rm = TRUE))
+    figures[[d]] = standard.heatmap(props, numbers = FALSE, main = d)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 5)))
+
+})
+```
+
+Nitrogens present systematic seasonal patterns: in each location, it is higher
+in winter/spring than in summer/autumn.
+
+```{r nitrogen_by_season, echo = FALSE, fig.width = 8, fig.height = 12}
+local({
+
+  figures = vector(nlevels(seasons), mode = "list")
+  names(figures) = levels(seasons)
+
+  for (s in levels(seasons)) {
+
+    props = prepare.map(data[seasons == s, ],
+              fun = function(loc) mean(loc[, "nitrogen"], na.rm = TRUE))
+    figures[[s]] = standard.heatmap(props, main = s, cex = 0.6, digits = 0)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, ncol = 2))
+
+})
+```
+
+A similar pattern appears to hold for `phosphorus`.
+
+```{r phosphorus_by_season, echo = FALSE, fig.width = 8, fig.height = 12}
+local({
+
+  figures = vector(nlevels(seasons), mode = "list")
+  names(figures) = levels(seasons)
+
+  for (s in levels(seasons)) {
+
+    props = prepare.map(data[seasons == s, ],
+              fun = function(loc) mean(loc[, "phosphorus"], na.rm = TRUE))
+    figures[[s]] = standard.heatmap(props, main = s, cex = 0.6, digits = 0)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, ncol = 2))
+
+})
+```
+
+---
+
+The variables `turbidity` and `secchi` both measure how clear the water is,
+albeit on opposite scales.
+
+> **Laura:** Since they have about the same amount of missing values, I suggest
+> we can drop Secchi and keep turbidity, out of the two.
+
+```{r compare_turbidity_and_secchi, echo = FALSE}
+standard.xyplot(log(turbidity) ~ I(-log(secchi)), regression = TRUE,
+  xlab = "- secchi (log-scale)", ylab = "turbidity (log-scale)")
+```
+
+This relationship is broadly reflected in the values in all locations.
+
+```{r clear_water_by_location, echo = FALSE, fig.width = 12, fig.height = 8}
+local({
+
+  props = prepare.map(data,
+            fun = function(loc) mean(loc[, "turbidity"], na.rm = TRUE))
+  p1 = standard.heatmap(props, main = "turbidity")
+  props = prepare.map(data,
+            fun = function(loc) mean(loc[, "secchi"], na.rm = TRUE))
+  p2 = standard.heatmap(props, main = "secchi")
+
+  grid.arrange(p1, p2, ncol = 2)
+
+})
+```
+
+The distribution of `turbidity` over locations does not appear to change over
+time.
+
+```{r turbidity_over_time, echo = FALSE, fig.width = 16, fig.height = 5}
+local({
+  
+  figures = vector(nlevels(decades), mode = "list")
+  names(figures) = levels(decades)
+
+  for (d in levels(decades)) {
+
+    props = prepare.map(data[decades == d, ],
+              fun = function(loc) mean(loc[, "turbidity"], na.rm = TRUE))
+    figures[[d]] = standard.heatmap(props, numbers = FALSE, main = d)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 5)))
+
+})
+```
+
+Neither does that of `secchi`.
+
+```{r secchi_over_time, echo = FALSE, fig.width = 16, fig.height = 5}
+local({
+  
+  figures = vector(nlevels(decades), mode = "list")
+  names(figures) = levels(decades)
+
+  for (d in levels(decades)) {
+
+    props = prepare.map(data[decades == d, ],
+              fun = function(loc) mean(loc[, "secchi"], na.rm = TRUE))
+    figures[[d]] = standard.heatmap(props, numbers = FALSE, main = d)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 5)))
+
+})
+```
+
+Turbidity does not present any particular seasonal patterns.
+
+```{r turbidity_by_season, echo = FALSE, fig.width = 8, fig.height = 12}
+local({
+
+  figures = vector(nlevels(seasons), mode = "list")
+  names(figures) = levels(seasons)
+
+  for (s in levels(seasons)) {
+
+    props = prepare.map(data[seasons == s, ],
+              fun = function(loc) mean(loc[, "turbidity"], na.rm = TRUE))
+    figures[[s]] = standard.heatmap(props, main = s, cex = 0.6)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, ncol = 2))
+
+})
+```
+
+Neither does `secchi`.
+
+```{r secchi_by_season, echo = FALSE, fig.width = 8, fig.height = 12}
+local({
+
+  figures = vector(nlevels(seasons), mode = "list")
+  names(figures) = levels(seasons)
+
+  for (s in levels(seasons)) {
+
+    props = prepare.map(data[seasons == s, ],
+              fun = function(loc) mean(loc[, "secchi"], na.rm = TRUE))
+    figures[[s]] = standard.heatmap(props, main = s, cex = 0.6)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, ncol = 2))
+
+})
+```
+
+> **Laura:** Secchi would be expected to depend on both turbidity and water
+> colour.
+
+The distribution of the colour number is bell-shaped on a log-scale but somewhat
+asymmetric, with a short left tail. The reason is that water colour is defined
+to be positive on the natural scale.
+
+```{r water_colour, echo = FALSE}
+local({
+
+  standard.histogram(log(data$colour.number), legend = "colour number")
+
+})
+```
+
+> **Laura:** The colour value is an old technique, traditionally done visually
+> by comparing the water to standardised colour samples.
+>
+> https://assets.thermofisher.com/TFS-Assets/LPD/Application-Notes/an_034_tip_color_measurement_1120.pdf
+>
+> It's usually related to humic components that are dissolved in the water and
+> make the water appear brown – in contrast to turbidity, which consists of
+> non-dissolved components (often clay etc.) that scatter light. There is no
+> theoretical upper limit to colour value as far as I'm aware. Waters from bog
+> ponds can reach values up to 200 or so.
+
+Broadly, `colour.number` takes lower values away from the coast. It gets higher
+in the northern locations and is exceptionally high only in one location.
+This pattern becomes more apparent if we count the proportion of observations
+which take `colour.number` values greater than 25 at each location.
+
+```{r colour_number_by_location, echo = FALSE, fig.width = 8, fig.height = 6}
+local({
+
+  props = prepare.map(data,
+            fun = function(loc) mean(loc[, "colour.number"], na.rm = TRUE))
+  p1 = standard.heatmap(props, digits = 1, cex = 0.7)
+
+  props = prepare.map(data,
+            fun = function(loc) mean(loc[, "colour.number"] > 25, na.rm = TRUE))
+  p2 = standard.heatmap(props, digits = 1, cex = 0.7)
+
+  grid.arrange(p1, p2, ncol = 2)
+
+})
+```
+
+Secchi is marginally correlated with both `turbidity` and `colour.number`, is
+correlated with `turbidity` given `colour.number`, and is correlated with
+`colour.number` given `turbidity`. This suggests that, indeed, `secchi` depends
+on both turbidity and water colour. (Using Spearman correlation as before.)
+
+On the other hand, `turbidity` appears to be correlated with `secchi` given
+colour but not with `colour.number` given `secchi`. The marginal correlation
+between `turbidity` and `colour.number` does not appear to be particularly strong,
+either. Therefore, it is likely that `turbidity` will not be linked to
+`water.colour` even if we drop `secchi`.
+
+```{r relationship_secchi_turbidity_colour, echo = FALSE}
+local({
+
+  df = data[, c("secchi", "turbidity", "colour.number")]    
+  cormat = cor(df, use = "pairwise.complete", method = "spearman")
+  precision = cov2cor(MASS::ginv(cormat))
+  dimnames(precision) = dimnames(cormat)
+  p1 = standard.heatmap(cormat, abs = TRUE)
+  p2 = standard.heatmap(precision, abs = TRUE)
+  grid.arrange(p1, p2, ncol = 2)
+
+})
+```
+
+---
+
+Water salinity seems to increase as you move from north-east to south-west, away
+from Finland and towards Denmark and the open ocean.
+
+```{r salinity_by_location, echo = FALSE, fig.width = 4, fig.height = 6}
+local({
+
+  props = prepare.map(data,
+            fun = function(loc) mean(loc[, "salinity"], na.rm = TRUE))
+  standard.heatmap(props)
+
+})
+```
+
+The distribution of salinity does not appear to change over time.
+
+```{r salinity_over_time, echo = FALSE, fig.width = 16, fig.height = 5}
+local({
+  
+  figures = vector(nlevels(decades), mode = "list")
+  names(figures) = levels(decades)
+
+  for (d in levels(decades)) {
+
+    props = prepare.map(data[decades == d, ],
+              fun = function(loc) mean(loc[, "salinity"], na.rm = TRUE))
+    figures[[d]] = standard.heatmap(props, numbers = FALSE, main = d)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, list(ncol = 5)))
+
+})
+```
+
+Salinity does not present any particular seasonal patterns.
+
+```{r salinity_by_season, echo = FALSE, fig.width = 8, fig.height = 12}
+local({
+
+  figures = vector(nlevels(seasons), mode = "list")
+  names(figures) = levels(seasons)
+
+  for (s in levels(seasons)) {
+
+    props = prepare.map(data[seasons == s, ],
+              fun = function(loc) mean(loc[, "salinity"], na.rm = TRUE))
+    figures[[s]] = standard.heatmap(props, main = s, cex = 0.6)
+
+  }#FOR
+
+  do.call(grid.arrange, c(figures, ncol = 2))
+
+})
+```
+
+
+```{r}
+str(data)
+```
