@@ -1,0 +1,365 @@
+---
+title: "Basic State-Space Network"
+author: "Marco Scutari"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r load_libraries, cache = FALSE, echo = FALSE, message = FALSE, warning = FALSE, results = FALSE}
+library(knitr)
+library(bnlearn)
+library(lattice)
+library(parallel)
+library(Rgraphviz)
+
+coords = c("rectangle", "year", "month", "lon", "lat", "lon.min", "lon.max",
+           "lat.min", "lat.max")
+
+areas = c("area", "coastline", "open.water", "water.area", "coastal.zone") 
+
+species = c("herring", "sprat", "cod", "flounder", "whitefish", "salmon", 
+            "trout", "smelt", "bream", "ide", "roach", "pike", "perch",
+            "sander", "burbot", "vendace")
+
+water = c("phosphorus", "colour.number", "nitrogen", "turbidity", "salinity",
+          "secchi", "temperature")
+
+# plot the rolled-up network with the feedback loops in a different colour.
+rolled.plot = function(two.time, main) {
+
+  # do not plot isolated nodes().
+  two.time = subgraph(two.time, setdiff(nodes(two.time), isolated.nodes(two.time)))
+  # merge the nodes and add the (bi)directed arcs.
+  gR = graphviz.plot(two.time, shape = "rectangle", render = FALSE)
+  collapsed.nodes = unique(gsub("_[01]", "", nodes(two.time)))
+  dbn = graphNEL(collapsed.nodes, edgemode = "directed")
+  arcs = gsub("_[01]", "", arcs(two.time))
+  for (a in seq(nrow(arcs)))
+    dbn = addEdge(from = arcs[a, "from"], to = arcs[a, "to"], dbn, 1)
+  # format the nodes.
+  dbn = layoutGraph(dbn)
+  nodeRenderInfo(dbn)$shape = "rectangle"
+  nodeRenderInfo(dbn) = list(iwidth = 2, iheight = 0.5)
+  # highlight unidirectional arcs, de-emphasize loops.
+  dbn = layoutGraph(dbn)
+  for (a in names(edgeRenderInfo(dbn)$direction)) {
+
+    if ((edgeRenderInfo(dbn)$enamesFrom[a] == edgeRenderInfo(dbn)$enamesTo[a]) ||
+        (edgeRenderInfo(dbn)$direction[a] == "both")) {
+
+      edgeRenderInfo(dbn)$col[a] = "skyblue"
+      edgeRenderInfo(dbn)$lwd[a] = 2.5
+
+    }#THEN
+
+  }#FOR
+  # add the title back.
+  graphRenderInfo(dbn)$main = main
+
+  renderGraph(dbn)
+
+}#ROLLED.PLOT
+
+cl = makeCluster(6)
+clusterEvalQ(cl, library(bnlearn))
+clusterEvalQ(cl, library(RhpcBLASctl))
+clusterEvalQ(cl, blas_set_num_threads(2))
+clusterEvalQ(cl, omp_set_num_threads(2))
+```
+
+# Load and Reformat the Data
+
+```{r load_the_data}
+data = readRDS("./for.analysis.rds")
+str(data)
+```
+
+```{r drop_duplicate_variables}
+redundant = c("area", "water.area", "coastline")
+data = data[, setdiff(colnames(data), redundant)]
+areas = setdiff(areas, redundant)
+```
+
+```{r two_time_data_format}
+timestamp = function(data) {
+
+  time = paste0(data[, "year"], sprintf("-%02d", data[, "month"]))
+  all.times = expand.grid(year = levels(data[, "year"]), 
+                          month = sprintf("%02d", as.numeric(levels(data[, "month"]))))
+  all.times = paste(all.times$year, all.times$month, sep = "-")
+  all.times = sort(all.times)
+  
+  return(factor(time, levels = all.times))
+
+}#TIMESTAMP
+
+two.time.format = function(data) {
+
+  data[, "time"] = timestamp(data)
+
+  reshaped = lapply(levels(data[, "rectangle"]), function(each.location, data) {
+
+    shift.level = function(x) {
+
+      ordered(as.integer(x) + 1, levels = seq_along(levels(x)), labels = levels(x))
+
+    }#SHIFT.LEVEL
+
+    # extract the data from a specific county...
+    local.data = subset(data, rectangle == each.location)
+    # ... order the observations to follow the time of collection...
+    local.data = local.data[order(local.data[, "time"]), ]
+
+    available.t0 = local.data[-nrow(local.data), "time"]
+    available.t1 = shift.level(available.t0)
+
+    both.t0.and.t1 =
+      (available.t0 %in% local.data[, "time"]) & 
+      (available.t1 %in% local.data[, "time"])
+
+    available.t0 = available.t0[both.t0.and.t1]
+    available.t1 = available.t1[both.t0.and.t1]
+
+    # ... extract the data at time 0 and time 1...
+    coords = subset(local.data, time %in% available.t0)[, c(coords, areas)]
+    t0 = subset(local.data, time %in% available.t0)[, c(species, water)]
+    colnames(t0) = paste0(colnames(t0), "_0")
+    t1 = subset(local.data, time %in% available.t1)[, c(species, water)]
+    colnames(t1) = paste0(colnames(t1), "_1")
+
+    return(cbind(coords, t0, t1))
+
+  }, data = data)
+
+  # collect the data from all the counties in a single data frame.
+  all.data = do.call(rbind, reshaped)
+  # sort by area, then year, then month.
+  key = order(all.data[, "rectangle"], all.data[, "year"], all.data[, "month"])
+  all.data = all.data[key, ]
+  # reset row names.
+  rownames(all.data) = NULL
+
+  return(all.data)
+
+}#TWO.TIME.FORMAT
+
+ttdata = two.time.format(data)
+```
+
+# Blacklist
+
+```{r blacklist_function}
+blacklist = function(data) {
+
+  t0.vars = grep("_0$", colnames(data), value = TRUE)
+  t1.vars = grep("_1$", colnames(data), value = TRUE)
+
+  # basic blacklist for dynamic BNs.
+  bl = rbind(tiers2blacklist(list(areas, t0.vars, t1.vars)),
+             set2blacklist(t0.vars), set2blacklist(t1.vars),
+             set2blacklist(areas), tiers2blacklist(list(t0.vars, areas)))
+
+  bl = rbind(bl, 
+    # no arcs from species to water characteristics.
+    tiers2blacklist(list(paste0(water, "_1"), paste0(species, "_0")))
+  )
+
+  return(bl)
+
+}#BLACKLIST
+```
+
+# Basic DBN without spatial structure
+
+```{r learning_functions}
+learn.dbn = function(data, penalty = 4) {
+
+  nodes = grep("_[01]$", colnames(data), value = TRUE)
+
+  tabu(data[, c(areas, nodes)], blacklist = blacklist(data), score = "pnal-g",
+    k = penalty * log(nrow(data)) / 2)
+
+}#LEARN.DBN
+
+averaging = function(data, penalty = 2, reps = 100) {
+
+  # bootstrap, column permutation and subsampling.
+  bagging = function(i, data, locations, penalty) {
+
+    keep = sample(levels(locations), nlevels(locations))
+    boot.sample = data[locations %in% keep, ]
+    boot.sample = boot.sample[, sample(ncol(data), ncol(data))]
+
+    learn.dbn(boot.sample, penalty = penalty)
+
+  }#BAGGING
+
+  # export the function and the variables we need to the slaves.
+  clusterExport(cl, c("learn.dbn", "blacklist", "areas", "water", 
+                      "species", "coords"))
+  # distribute the bootstrapping to the slaves.
+  dags = parLapply(cl, seq(reps), bagging, data = data,
+                   locations = data[, "rectangle"], penalty = penalty)
+  # compute the arc strengths.
+  strength = custom.strength(dags, nodes = nodes(dags[[1]]))
+  # construct the consensus network.
+  consensus = averaged.network(strength)
+  consensus$learning$args[["strength"]] = strength
+
+  return(consensus)
+
+}#AVERAGING
+```
+
+```{r learn_baseline_model}
+dbn.iid = averaging(ttdata, penalty = 8)
+```
+
+```{r plot_classic_dbn, echo = FALSE, out.width = "100%", fig.width = 9, fig.height = 7}
+rolled.plot(dbn.iid, main = "DBN without spatial structure")
+```
+
+# DBN with spatial structure
+
+```{r spatial_learning_functions}
+estimate.nugget.and.range = function(dag, node, data) {
+
+  # get the parents of the node...
+  pars = parents(dag, node)
+  # ... find the subset of the data that is locally complete...
+  full = data[complete.cases(data[, c(node, pars)]), ]
+  # ... add timestamps to use as grouping factors...
+  full[, "timestamp"] = timestamp(full)
+  # ... refit the local distribution...
+  f = paste(node, "~", paste(c("1", pars), collapse = "+"))
+
+  ldist = nlme::gls(as.formula(f), data = full,
+            cor = nlme::corExp(form = ~ lat + lon | timestamp, nugget = TRUE),
+            control = list(apVar = FALSE))
+
+  nlme:::coef.corSpatial(ldist$modelStruct$corStruct, unconstrained = FALSE)
+
+}#ESTIMATE.NUGGET.AND.RANGE
+
+custom.local.distribution = function(node, parents, data, args) {
+
+  t0.vars = grep("_0", colnames(data), value = TRUE)
+
+  # add back the coordinates to the data.
+  data = cbind(data, args$coords)
+  # find the subset of the data that is locally complete.
+  full = data[complete.cases(data[, c(node, parents)]), ]
+  # ... add timestamps to use as grouping factors...
+  full[, "timestamp"] = timestamp(full)
+  # create the formula for gls().
+  f = paste(node, "~", paste(c("1", parents), collapse = "+"))
+
+  if (node %in% c(t0.vars, areas)) {
+
+    # these nodes are always root nodes, so there is no point in modelling their
+    # spatial correlation structure.
+    model = nlme::gls(as.formula(f), data = full)
+    np = length(parents) + 2
+
+  }#THEN
+  else {
+
+    model = nlme::gls(as.formula(f), data = full,
+                cor = nlme::corExp(value = args$spatial[, node],
+                                   form = ~ lat + lon | timestamp,
+                                   nugget = TRUE, fixed = TRUE),
+          control = list(singular.ok = TRUE, returnObject = TRUE, apVar = FALSE))
+
+    np = length(parents) + 4
+
+    # save additional information to evaluate heterogeneity.
+    attr(model, "coords") = full[, coords]
+
+  }#ELSE
+
+  # save what we need to compute the node-averaged log-likelihood.
+  attr(model, "pnal.nall") = nrow(data)
+  attr(model, "pnal.ncomplete") = nrow(full)
+  attr(model, "pnal.nparams") = np
+
+  return(model)
+
+}#CUSTOM.LOCAL.DISTRIBUTION
+
+custom.pnal = function(node, parents, data, args) {
+
+  ldist = custom.local.distribution(node, parents, data, args)
+
+  nall = attr(ldist, "pnal.nall")
+  ncomp = attr(ldist, "pnal.ncomplete")
+  np = attr(ldist, "pnal.nparams")
+
+  pnal = nlme:::logLik.gls(ldist, REML = FALSE) / ncomp -
+           args$w * log(nall) / 2 * np / nall
+
+  return(as.numeric(pnal))
+
+}#CUSTOM.PNAL
+
+learn.spatial.dbn = function(data, penalty = 2, initial.dag) {
+
+  t0.vars = grep("_[0]$", colnames(data), value = TRUE)
+  t1.vars = grep("_[1]$", colnames(data), value = TRUE)
+  nodes = c(areas, t0.vars, t1.vars)
+
+  spatial.params =
+    sapply(t1.vars, estimate.nugget.and.range, data = data, dag = initial.dag)
+
+  tabu(data[, nodes], blacklist = blacklist(data[, nodes]),
+    score = "custom", fun = custom.pnal,
+    args = list(spatial = spatial.params, w = penalty,
+                coords = data[, coords]))
+
+}#LEARN.SPATIAL.DBN
+
+spatial.averaging = function(data, penalty = 2, reps = 100, initial.dag) {
+
+  # bootstrap, column permutation and subsampling.
+  bagging = function(i, data, locations, penalty, initial.dag) {
+
+    keep = sample(levels(locations), nlevels(locations))
+    boot.sample = data[locations %in% keep, ]
+    boot.sample = boot.sample[, sample(ncol(data), ncol(data))]
+
+    learn.spatial.dbn(boot.sample, penalty = penalty, initial.dag = initial.dag)
+
+  }#BAGGING
+
+  # export the function and the variables we need to the slaves.
+  clusterExport(cl, c("custom.pnal", "custom.local.distribution", "blacklist",
+                      "learn.spatial.dbn", "estimate.nugget.and.range",
+                      "timestamp"))
+  # distribute the bootstrapping to the slaves.
+  dags = parLapply(cl, seq(reps), bagging, data = data,
+                   locations = data[, "rectangle"], penalty = penalty,
+                   initial.dag = initial.dag)
+  # compute the arc strengths.
+  strength = custom.strength(dags, nodes = nodes(dags[[1]]))
+  # construct the consensus network, saving the arc strengths.
+  consensus = averaged.network(strength)
+  consensus$learning$args[["strength"]] = strength
+
+  return(consensus)
+
+}#SPATIAL.AVERAGING
+```
+
+```{r run_averaging_with_spatial_correlation}
+spatial.dbn = spatial.averaging(ttdata, penalty = 16, initial.dag = dbn.iid)
+spatial.dbn
+```
+
+```{r plot_spatial_dbn, echo = FALSE, out.width = "100%", fig.width = 9, fig.height = 7}
+rolled.plot(spatial.dbn, main = "DBN with spatial structure")
+```
+
+
+
+```{r cleanup}
+stopCluster(cl)
+```
