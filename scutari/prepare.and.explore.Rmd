@@ -1070,7 +1070,6 @@ local({
 })
 ```
 
-
-```{r}
-str(data)
+```{r resave_data, echo = FALSE}
+saveRDS(data , file = "./for.analysis.rds")
 ```
