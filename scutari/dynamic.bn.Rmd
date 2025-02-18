@@ -311,7 +311,7 @@ learn.spatial.dbn = function(data, penalty = 2, initial.dag) {
     sapply(t1.vars, estimate.nugget.and.range, data = data, dag = initial.dag)
 
   tabu(data[, nodes], blacklist = blacklist(data[, nodes]),
-    score = "custom", fun = custom.pnal,
+    score = "custom-score", fun = custom.pnal,
     args = list(spatial = spatial.params, w = penalty,
                 coords = data[, coords]))
 
